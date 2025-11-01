@@ -1,0 +1,86 @@
+{
+  "manifest_version": 3,
+  "name": "图酷通用采集器",
+  "version": "1.0.0",
+  "description": "在 Temu/天猫/淘宝/1688 页面采集商品数据并同步到公司后台。",
+  "icons": {
+    "128": "icons/logo.png"
+  },
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage",
+    "downloads",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://www.temu.com/*",
+    "https://*.temu.com/*",
+    "https://detail.tmall.com/*",
+    "https://*.tmall.com/*",
+    "https://item.taobao.com/*",
+    "https://*.taobao.com/*",
+    "https://detail.1688.com/*",
+    "https://*.1688.com/*",
+    "https://*/*",
+    "http://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "图酷通用采集器"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.taobao.com/*",
+        "https://*.tmall.com/*",
+        "https://chaoshi.detail.tmall.com/*",
+        "https://list.taobao.com/*",
+        "https://list.tmall.com/*"
+      ],
+      "js": [
+        "list-force-same-tab.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://*.1688.com/*",
+        "https://*.taobao.com/*",
+        "https://*.temu.com/*",
+        "https://*.tmall.com/*",
+        "https://chaoshi.detail.tmall.com/*",
+        "https://detail.1688.com/*",
+        "https://detail.tmall.com/*",
+        "https://item.taobao.com/*",
+        "https://list.taobao.com/*",
+        "https://list.tmall.com/*",
+        "https://www.temu.com/*"
+      ],
+      "js": [
+        "contentScript.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "list-force-same-tab-injected.js"
+      ],
+      "matches": [
+        "https://*.tmall.com/*",
+        "https://*.taobao.com/*",
+        "https://chaoshi.detail.tmall.com/*",
+        "https://list.taobao.com/*",
+        "https://list.tmall.com/*"
+      ]
+    }
+  ]
+}

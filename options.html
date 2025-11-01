@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>图酷通用采集器设置</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="wrapper">
+      <h1>图酷通用采集器设置</h1>
+      <form id="configForm" class="form">
+        <label class="field">
+          <span>后台 API 基址</span>
+          <input id="apiBaseInput" type="url" placeholder="https://backend.example.com/api" required />
+          <small class="hint">用于拼接登录、校验和采集任务接口</small>
+        </label>
+        <label class="field">
+          <span>登录页路径</span>
+          <input id="loginPagePathInput" type="text" placeholder="/#/login" />
+          <small class="hint">用于弹出后台登录窗口，可填写 /#/login 或完整地址</small>
+        </label>
+        <label class="field">
+          <span>登录接口路径</span>
+          <input id="loginPathInput" type="text" placeholder="/auth/login" />
+        </label>
+        <label class="field">
+          <span>Token 校验路径</span>
+          <input id="verifyPathInput" type="text" placeholder="/auth/verify" />
+        </label>
+        <label class="field">
+          <span>创建采集任务路径</span>
+          <input id="createTaskPathInput" type="text" placeholder="/collector/tasks" />
+        </label>
+        <label class="field">
+          <span>最近任务查询路径</span>
+          <input id="recentTasksPathInput" type="text" placeholder="/collector/tasks?mine=1&limit=5" />
+        </label>
+        <div class="field checkbox-field">
+          <label class="checkbox">
+            <input id="debugModeInput" type="checkbox" />
+            <span>启用调试日志（控制台输出请求信息）</span>
+          </label>
+        </div>
+        <div class="actions">
+          <button type="submit" class="primary">保存</button>
+          <span id="status" class="status"></span>
+        </div>
+      </form>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>图酷通用采集器</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="wrapper">
+      <header class="header">
+        <div class="header-info">
+          <h1 class="title">图酷通用采集器</h1>
+          <p class="subtitle">Temu · 天猫 · 淘宝 · 1688</p>
+        </div>
+        <button id="openOptions" class="ghost-button" type="button">设置</button>
+      </header>
+      <section id="globalStatus" class="banner" hidden></section>
+      <section class="card auth-card">
+        <div class="auth-main">
+          <p id="authStatus" class="auth-status">未登录</p>
+          <p id="authMeta" class="auth-meta">点击下方按钮在页面中完成登录。</p>
+        </div>
+        <div class="auth-actions">
+          <button id="loginTrigger" class="secondary" type="button">去登录</button>
+          <button id="verifyButton" class="secondary" type="button">校验</button>
+          <button id="logoutButton" class="ghost-button" type="button">退出</button>
+        </div>
+      </section>
+      <section class="card config-card">
+        <h2>后台配置</h2>
+        <div class="config-row">
+          <span>API 基址</span>
+          <strong id="apiBaseDisplay">未配置</strong>
+        </div>
+        <div class="config-row">
+          <span>任务接口</span>
+          <strong id="taskPathDisplay">-</strong>
+        </div>
+      </section>
+      <section class="card tasks-card">
+        <div class="tasks-header">
+          <h2>最近采集任务</h2>
+          <button id="refreshTasksButton" class="secondary" type="button">刷新</button>
+        </div>
+        <ul id="tasksList" class="tasks-list" hidden></ul>
+        <p id="tasksEmpty" class="empty">暂无记录。</p>
+      </section>
+      <footer class="footer">
+        <button id="openBackendButton" class="primary" type="button">打开后台采集列表</button>
+      </footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
