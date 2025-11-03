@@ -222,12 +222,23 @@
     if (!normalized) {
       return null;
     }
-    if (siteId === 'TMALL' || siteId === 'TAOBAO') {
-      normalized = normalized.replace(/_(\\d+x\\d+q\\d+|\\d+x\\d+|sum)\\.(jpg|png|jpeg)$/i, '.$2');
-      normalized = normalized.replace(/\\.jpg_!!.*$/i, '.jpg');
-    }
-    if (siteId === 'ALI1688') {
-      normalized = normalized.replace(/_(\\d+x\\d+|400x400)\\.(jpg|png|jpeg)$/i, '.$2');
+    const needsCleanup = siteId === 'TMALL' || siteId === 'TAOBAO' || siteId === 'ALI1688';
+    if (needsCleanup) {
+      const cleanupPathname = (pathname) => {
+        let result = pathname;
+        result = result.replace(/(\.(?:jpe?g|png))(?:_[^\/]+)+(?:\.webp)?$/i, '$1');
+        result = result.replace(/(\.(?:jpe?g|png))_[^\/]*(?=[\/?#]|$)/i, '$1');
+        result = result.replace(/\.jpg_!!.*$/i, '.jpg');
+        result = result.replace(/\.webp$/i, '.jpg');
+        return result;
+      };
+      try {
+        const parsed = new URL(normalized);
+        parsed.pathname = cleanupPathname(parsed.pathname);
+        normalized = parsed.toString();
+      } catch (error) {
+        normalized = cleanupPathname(normalized);
+      }
     }
     return normalized;
   }

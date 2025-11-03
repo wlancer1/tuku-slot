@@ -2166,25 +2166,13 @@ function scrapeTmallProduct() {
     getTextContent('#J_PromoPrice .tm-price') ||
     getTextContent('#J_StrPriceModBox .tm-price') ||
     '';
-  const mainImageEl = document.querySelector('#mainPicImageEl[src], .mainPicWrap--Ns5WQiHr img[src]');
-  const zoomBackground = document.querySelector('.js-image-zoom__zoomed-image');
-  const zoomBackgroundUrl = zoomBackground?.style?.backgroundImage
-    ? zoomBackground.style.backgroundImage.replace(/url\((['"]?)(.*?)\1\)/, '$2')
-    : '';
   const images = dedupe([
-    ...ensureArray(jsonLd?.image),
-    mainImageEl ? mainImageEl.getAttribute('src') : null,
-    zoomBackgroundUrl || null,
-    ...collectImageSources('#mainPicImageEl, .mainPicWrap--Ns5WQiHr img'),
-    ...collectImageSources('#J_UlThumb img'),
-    ...collectImageSources('.tb-thumb img')
+    // SKU 规格图块
+    ...collectImageSources('[class^="valueItemImgWrap--"] img'),
+    ...collectImageSources('[class*="valueItemImgWrap"] img'),
+    ...collectImageSources('#J_TSaleProp li img')
   ]).map((url) => normalizeImageUrl(url, 'TMALL')).filter(Boolean);
-  const detailImages = dedupe([
-    ...collectImageSources('#description img'),
-    ...collectImageSources('#desc-lazyload-container img'),
-    ...collectImageSources('.desc-content img'),
-    ...collectImageSources('[data-spm-anchor-id] img')
-  ]).map((url) => normalizeImageUrl(url, 'TMALL')).filter(Boolean);
+  const detailImages = [];
   const attrs = extractKeyValuePairs(document.querySelectorAll('#J_AttrUL li, .attributes-list li'));
   const sellerInfo = {
     name: getTextContent('#J_ShopInfo .tb-shop-name a'),
