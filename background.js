@@ -29,6 +29,7 @@ chrome.runtime.onInstalled.addListener(() => {
   inlineSessionsReady = loadPersistedInlineSessions();
 });
 
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { type, payload } = message || {};
 

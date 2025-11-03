@@ -1,4 +1,6 @@
 const LOG_PREFIX = '[图酷通用采集器内容]';
+// 调试开关：开启后在控制台输出天猫批量流程的关键节点
+const DEBUG_TMALL_INLINE = true;
 const STYLE_ID = 'gc-collector-style';
 const BUTTON_ID = 'gc-collector-button';
 const TOAST_ID = 'gc-collector-toast';
@@ -313,7 +315,6 @@ function updateButtonVisibility() {
     return;
   }
   STATE.button.style.display = 'flex';
-
   if (!STATE.config?.apiBaseUrl) {
     setButtonState('disabled', '请先配置后台');
     STATE.button.title = '请在扩展设置页配置后台 API 基址';
@@ -563,7 +564,7 @@ function openLoginPopup(options = {}) {
 }
 
 function handleLoginMessage(event) {
-  console.log('Received login message:', event);
+
   if (!event) {
     return;
   }
@@ -744,6 +745,7 @@ async function collectTmallListWithDetails(scraper) {
     const parsed = (await scraper()) || {};
     const parsedItems = Array.isArray(parsed.items) ? parsed.items.filter(Boolean) : [];
     const total = cards.length;
+    await waitForTmallCard(total);
     const sessionItems = Array.from({ length: total }, (_, index) => parsedItems[index] || {});
 
     const startResp = await sendRuntimeMessage('collector/inlineStart', {
@@ -808,6 +810,7 @@ async function captureListState(metadata = {}) {
     ...metadata,
     awaitingResume: STATE.awaitingListResume
   };
+  STATE.inlineResults = Array.isArray(STATE.inlineResults) ? STATE.inlineResults : [];
   const scrollTop =
     window.pageYOffset ||
     document.documentElement.scrollTop ||
@@ -1020,7 +1023,8 @@ function dispatchInputEvents(element) {
   element.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
-function waitForTmallCard(index, timeout = 6000) {
+function waitForTmallCard(index, timeout = 9000) {
+  // 等待列表渲染出指定数量的商品卡片（最多等待 timeout 毫秒）
   return new Promise((resolve) => {
     const start = Date.now();
     const check = () => {
@@ -1099,22 +1103,43 @@ async function inlineGetSummary() {
 
 async function inlineRequestNext() {
   await INLINE_CONTEXT_READY;
-  if (!INLINE.sessionId || INLINE.requesting) {
+  
+  // 防重复调用: 无会话、正在请求、或等待恢复时跳过
+  if (!INLINE.sessionId || INLINE.requesting || STATE.awaitingListResume) {
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} inlineRequestNext 跳过`, {
+        hasSession: !!INLINE.sessionId,
+        requesting: INLINE.requesting,
+        awaitingResume: STATE.awaitingListResume
+      });
+    }
     return;
   }
+  
   INLINE.requesting = true;
+  
   try {
     const response = await sendRuntimeMessage('collector/inlineNext', {
       sessionId: INLINE.sessionId
     });
+    
     if (!response?.ok) {
-      throw new Error(response?.error || '推进批量任务失败。');
+      throw new Error(response?.error || '推进批量任务失败');
     }
+    
     if (response.done) {
       await finalizeInlineSession(response.summary || (await inlineGetSummary()));
       return;
     }
 
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} inlineNext response`, {
+        index: response.index,
+        total: response.total,
+        hasItem: !!response.item
+      });
+    }
+    
     INLINE.activeIndex = response.index;
     INLINE.total = response.total || INLINE.total;
     await storeInlineContext(INLINE.sessionId, INLINE.activeIndex, INLINE.total);
@@ -1123,34 +1148,94 @@ async function inlineRequestNext() {
       STATE.button.title = `正在采集第 ${response.index + 1}/${INLINE.total} 个商品`;
     }
 
-    if (STATE.site?.id === 'TMALL' && STATE.pageType === 'list') {
-      await waitForTmallCard(response.index + 1);
+    const onTmallListPage = STATE.site?.id === 'TMALL' && STATE.pageType === 'list';
+    
+    // 不在列表页时设置等待标记并返回
+    if (!onTmallListPage) {
+      if (DEBUG_TMALL_INLINE) {
+        console.debug(`${LOG_PREFIX} 等待返回列表`, {
+          index: response.index,
+          pageType: STATE.pageType,
+          url: location.href
+        });
+      }
+      STATE.awaitingListResume = true;
+      return;
     }
 
+    // 在列表页执行点击前设置等待标记
     STATE.awaitingListResume = true;
-    await captureListState({ index: response.index, total: INLINE.total, awaitingResume: true });
+    await captureListState({ 
+      index: response.index, 
+      total: INLINE.total, 
+      awaitingResume: true 
+    });
 
-    if (!simulateCardClick(response.index)) {
-      STATE.awaitingListResume = false;
-      await captureListState({ reason: 'card-missing', index: response.index, total: INLINE.total, awaitingResume: false });
-      await sendRuntimeMessage('collector/inlineReportDetail', {
-        sessionId: INLINE.sessionId,
+    // 等待卡片渲染
+    await waitForTmallCard(response.index + 1, 6000);
+    
+    const targetItem = response.item || {};
+    
+    if (DEBUG_TMALL_INLINE) {
+      const cards = getTmallListCardElements();
+      console.debug(`${LOG_PREFIX} 尝试点击列表卡片`, {
         index: response.index,
-        failure: {
-          reason: 'card-missing',
-          message: '未匹配到商品卡片'
-        }
+        totalCards: cards.length,
+        targetUrl: targetItem?.source_url || targetItem?.url
       });
-      INLINE.activeIndex = -1;
-      await storeInlineContext(INLINE.sessionId, -1, INLINE.total);
-      setTimeout(() => {
-        inlineRequestNext();
-      }, 0);
     }
+
+    // 尝试点击卡片
+    if (simulateCardClick(response.index)) {
+      if (DEBUG_TMALL_INLINE) {
+        console.debug(`${LOG_PREFIX} 成功点击卡片`, { index: response.index });
+      }
+      return;
+    }
+
+    // 点击失败,尝试备用 URL
+    const targetUrl = targetItem.source_url || targetItem.url || targetItem.link;
+    if (targetUrl) {
+      if (DEBUG_TMALL_INLINE) {
+        console.debug(`${LOG_PREFIX} fallback 使用链接`, { index: response.index, targetUrl });
+      }
+      location.assign(targetUrl);
+      return;
+    }
+    
+    // 无备用 URL,报告失败并继续下一个
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} 卡片缺失,跳过`, { index: response.index });
+    }
+    
+    STATE.awaitingListResume = false;
+    await captureListState({ 
+      reason: 'card-missing', 
+      index: response.index, 
+      awaitingResume: false 
+    });
+    
+    await sendRuntimeMessage('collector/inlineReportDetail', {
+      sessionId: INLINE.sessionId,
+      index: response.index,
+      failure: {
+        reason: 'card-missing',
+        message: '未匹配到商品卡片'
+      }
+    });
+    
+    INLINE.activeIndex = -1;
+    await storeInlineContext(INLINE.sessionId, -1, INLINE.total);
+    
+    // 延迟后继续下一个
+    setTimeout(() => {
+      inlineRequestNext();
+    }, 500);
+    
   } catch (error) {
     console.error(LOG_PREFIX, '批量采集推进失败', error);
     await inlineAbort();
-    showToast(error?.message || '批量采集失败，请稍后重试。', 'error');
+    showToast(error?.message || '批量采集失败,请稍后重试', 'error');
   } finally {
     INLINE.requesting = false;
   }
@@ -1158,8 +1243,26 @@ async function inlineRequestNext() {
 
 function handleInlineItemResult(payload) {
   if (!payload || payload.sessionId !== INLINE.sessionId) {
+    if (DEBUG_TMALL_INLINE) {
+      console.warn(`${LOG_PREFIX} 收到无效结果`, {
+        hasPayload: !!payload,
+        sessionMatch: payload?.sessionId === INLINE.sessionId
+      });
+    }
     return;
   }
+  
+  if (DEBUG_TMALL_INLINE) {
+    console.debug(`${LOG_PREFIX} handleInlineItemResult`, {
+      index: payload.index,
+      hasDetail: !!payload.detail,
+      hasFailure: !!payload.failure,
+      done: payload.done,
+      currentPageType: STATE.pageType,
+      awaitingResume: STATE.awaitingListResume
+    });
+  }
+  
   INLINE.activeIndex = -1;
   storeInlineContext(INLINE.sessionId, -1, INLINE.total);
 
@@ -1174,6 +1277,7 @@ function handleInlineItemResult(payload) {
       payload.detail
     );
   }
+  
   if (payload.failure) {
     console.warn(
       `${LOG_PREFIX} 批量采集失败 [${payload.index + 1}/${INLINE.total}]`,
@@ -1183,23 +1287,51 @@ function handleInlineItemResult(payload) {
 
   if (payload.done) {
     finalizeInlineSession(payload.summary || null);
-  } else {
-    if (!STATE.awaitingListResume) {
-      inlineRequestNext();
+    return;
+  }
+  
+  // 关键修复: 仅在列表页推进,详情页不做任何操作(等待 runTmallInlineDetailScrape 返回列表)
+  if (STATE.pageType === 'list') {
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} 列表页收到结果,延迟推进`);
     }
+    
+    // 不检查 awaitingResume,让 inlineRequestNext 内部检查
+    setTimeout(() => {
+      inlineRequestNext();
+    }, 800);
+  } else {
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} 详情页收到结果,等待返回列表`, {
+        pageType: STATE.pageType
+      });
+    }
+    // 详情页什么都不做,等待 runTmallInlineDetailScrape 自动返回
   }
 }
 
 async function resumeTmallInlineAutomation() {
   await INLINE_CONTEXT_READY;
+  
   if (!INLINE.sessionId) {
     return;
   }
+  
+  if (DEBUG_TMALL_INLINE) {
+    console.debug(`${LOG_PREFIX} resumeTmallInlineAutomation`, {
+      sessionId: INLINE.sessionId,
+      activeIndex: INLINE.activeIndex,
+      pageType: STATE.pageType,
+      awaitingResume: STATE.awaitingListResume
+    });
+  }
+
   const summary = await inlineGetSummary().catch(() => null);
   if (!summary) {
     await inlineAbort();
     return;
   }
+  
   INLINE.total = summary.total || INLINE.total;
   INLINE.activeIndex = summary.currentIndex ?? INLINE.activeIndex;
   await storeInlineContext(INLINE.sessionId, INLINE.activeIndex, INLINE.total);
@@ -1216,22 +1348,42 @@ async function resumeTmallInlineAutomation() {
   if (STATE.pageType === 'list') {
     await restoreListState();
     INLINE.requesting = false;
+    
+    // 关键修复:无论 awaitingListResume 状态如何,都尝试推进
     if (STATE.awaitingListResume) {
+      if (DEBUG_TMALL_INLINE) {
+        console.debug(`${LOG_PREFIX} 检测到等待恢复标记,清除并推进`);
+      }
       STATE.awaitingListResume = false;
-      await inlineRequestNext();
-      return;
     }
+    
     if (summary.status === 'completed') {
       await finalizeInlineSession(summary);
       return;
     }
-    await inlineRequestNext();
+    
+    await waitForTmallCard(Math.max(1, INLINE.activeIndex + 2));
+    
+    // 延迟后推进,确保页面稳定
+    setTimeout(() => {
+      if (DEBUG_TMALL_INLINE) {
+        console.debug(`${LOG_PREFIX} 列表页恢复完成,推进下一个`, {
+          activeIndex: INLINE.activeIndex,
+          total: INLINE.total
+        });
+      }
+      inlineRequestNext();
+    }, 1000);
   }
 }
 
 async function runTmallInlineDetailScrape() {
   await INLINE_CONTEXT_READY;
+  
   if (!INLINE.sessionId) {
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} 无会话ID,跳过详情采集`);
+    }
     return;
   }
 
@@ -1244,21 +1396,45 @@ async function runTmallInlineDetailScrape() {
       await storeInlineContext(INLINE.sessionId, INLINE.activeIndex, INLINE.total);
     }
   }
+  
   if (index < 0) {
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} 无效索引,跳过详情采集`);
+    }
     return;
+  }
+
+  if (DEBUG_TMALL_INLINE) {
+    console.debug(`${LOG_PREFIX} 开始详情页采集`, { index, url: location.href });
   }
 
   let detail = null;
   let failure = null;
+  
   try {
+    await waitForTmallDetailReady();
     detail = await scrapeTmallProduct();
+    
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} 详情采集成功`, {
+        index,
+        title: detail?.title,
+        images: detail?.images?.length || 0,
+        detailImages: detail?.detailImages?.length || 0
+      });
+    }
   } catch (error) {
     failure = {
       reason: error?.message || '采集失败',
       stack: error?.stack || null
     };
+    
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} 详情采集失败`, { index, error: failure.reason });
+    }
   }
 
+  // 关键修复:先上报结果
   const response = await sendRuntimeMessage('collector/inlineReportDetail', {
     sessionId: INLINE.sessionId,
     index,
@@ -1266,12 +1442,97 @@ async function runTmallInlineDetailScrape() {
     failure
   });
 
-  if (response?.action === 'return') {
-    if (history.length > 1) {
-      history.back();
-    } else if (response?.listUrl) {
-      window.location.assign(response.listUrl);
+  if (DEBUG_TMALL_INLINE) {
+    console.debug(`${LOG_PREFIX} 详情采集结果已上报`, {
+      index,
+      hasDetail: !!detail,
+      hasFailure: !!failure,
+      action: response?.action,
+      hasHistory: history.length > 1,
+      listUrl: response?.listUrl
+    });
+  }
+
+  // 关键修复:无论后台返回什么action,都强制返回列表页
+  if (history.length > 1) {
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} 使用 history.back() 返回`);
     }
+    history.back();
+    return;
+  }
+  
+  // 备用方案1: 使用后台返回的 listUrl
+  if (response?.listUrl) {
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} 使用后台 listUrl 返回`, { url: response.listUrl });
+    }
+    location.assign(response.listUrl);
+    return;
+  }
+  
+  // 备用方案2: 使用存储的 listUrl
+  const stored = await new Promise((resolve) => {
+    chrome.storage.local.get([LIST_STATE_STORAGE_KEY], (items) => {
+      resolve(items?.[LIST_STATE_STORAGE_KEY]);
+    });
+  });
+  
+  if (stored?.listUrl) {
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} 使用存储的 listUrl 返回`, { url: stored.listUrl });
+    }
+    location.assign(stored.listUrl);
+    return;
+  }
+  
+  // 备用方案3: 使用 sessionStorage
+  try {
+    const fromSession = sessionStorage.getItem(LIST_STATE_SESSION_KEY);
+    if (fromSession) {
+      const sessionData = JSON.parse(fromSession);
+      if (sessionData?.listUrl) {
+        if (DEBUG_TMALL_INLINE) {
+          console.debug(`${LOG_PREFIX} 使用 sessionStorage listUrl 返回`, { url: sessionData.listUrl });
+        }
+        location.assign(sessionData.listUrl);
+        return;
+      }
+    }
+  } catch (error) {
+    // ignore
+  }
+  
+  // 最后兜底:尝试从referrer推断
+  if (document.referrer && document.referrer.includes('tmall.com')) {
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} 使用 referrer 返回`, { url: document.referrer });
+    }
+    location.assign(document.referrer);
+    return;
+  }
+  
+  // 完全失败,中止会话
+  if (DEBUG_TMALL_INLINE) {
+    console.warn(`${LOG_PREFIX} 无法返回列表页,中止批量采集`);
+  }
+  await inlineAbort();
+  showToast('无法返回列表页,批量采集已终止', 'error');
+}
+
+async function waitForTmallDetailReady(timeout = 5000) {
+  // 详情页需要等主图与标题加载完成再提取数据
+  if (STATE.site?.id !== 'TMALL' || STATE.pageType !== 'product') {
+    return;
+  }
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const imageEl = document.querySelector('#mainPicImageEl[src], .mainPicWrap--Ns5WQiHr img[src]');
+    const titleEl = document.querySelector('#J_DetailMeta .tb-detail-hd h1, #J_Title h3');
+    if (imageEl && imageEl.getAttribute('src') && titleEl && titleEl.textContent?.trim()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120));
   }
 }
 
@@ -1494,7 +1755,6 @@ function openLoginPopup(options = {}) {
 }
 
 function handleLoginMessage(event) {
-  console.log('Received login message:', event);
   if (!event) {
     return;
   }
@@ -2336,15 +2596,24 @@ function scrapeTmallProduct() {
     getTextContent('#J_PromoPrice .tm-price') ||
     getTextContent('#J_StrPriceModBox .tm-price') ||
     '';
+  const mainImageEl = document.querySelector('#mainPicImageEl[src], .mainPicWrap--Ns5WQiHr img[src]');
+  const zoomBackground = document.querySelector('.js-image-zoom__zoomed-image');
+  const zoomBackgroundUrl = zoomBackground?.style?.backgroundImage
+    ? zoomBackground.style.backgroundImage.replace(/url\((['"]?)(.*?)\1\)/, '$2')
+    : '';
   const images = dedupe([
     ...ensureArray(jsonLd?.image),
+    mainImageEl ? mainImageEl.getAttribute('src') : null,
+    zoomBackgroundUrl || null,
+    ...collectImageSources('#mainPicImageEl, .mainPicWrap--Ns5WQiHr img'),
     ...collectImageSources('#J_UlThumb img'),
     ...collectImageSources('.tb-thumb img')
   ]).map((url) => normalizeImageUrl(url, 'TMALL')).filter(Boolean);
   const detailImages = dedupe([
     ...collectImageSources('#description img'),
     ...collectImageSources('#desc-lazyload-container img'),
-    ...collectImageSources('.desc-content img')
+    ...collectImageSources('.desc-content img'),
+    ...collectImageSources('[data-spm-anchor-id] img')
   ]).map((url) => normalizeImageUrl(url, 'TMALL')).filter(Boolean);
   const attrs = extractKeyValuePairs(document.querySelectorAll('#J_AttrUL li, .attributes-list li'));
   const sellerInfo = {
