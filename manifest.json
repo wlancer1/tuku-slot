@@ -65,6 +65,7 @@
       ],
       "js": [
         "collector-utils.js",
+        "sites/tmall.js",
         "contentScript.js"
       ],
       "run_at": "document_idle"
