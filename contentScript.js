@@ -756,6 +756,37 @@ const INLINE = {
 const INLINE_CONTEXT_READY = restoreInlineContext();
 const LIST_STATE_STORAGE_KEY = 'tmallListState';
 const LIST_STATE_SESSION_KEY = 'tmallListStateSession';
+const INLINE_RESULTS_STORAGE_PREFIX = 'tmallInlineResults:';
+
+function getInlineResultsStorageKey(sessionId) {
+  return `${INLINE_RESULTS_STORAGE_PREFIX}${sessionId}`;
+}
+
+async function loadInlineResultsFromStorage(sessionId) {
+  if (!sessionId) {
+    return [];
+  }
+  const key = getInlineResultsStorageKey(sessionId);
+  try {
+    const stored = await storageGet('local', [key]);
+    const results = stored?.[key];
+    return Array.isArray(results) ? results : [];
+  } catch (error) {
+    console.warn(`${LOG_PREFIX} 读取批量结果缓存失败`, error);
+    return [];
+  }
+}
+
+function persistInlineResultsToStorage(sessionId, results) {
+  if (!sessionId) {
+    return;
+  }
+  const key = getInlineResultsStorageKey(sessionId);
+  const payload = Array.isArray(results) ? results : [];
+  storageSet('local', { [key]: payload }).catch((error) => {
+    console.warn(`${LOG_PREFIX} 保存批量结果缓存失败`, error);
+  });
+}
 
 async function collectTmallListWithDetails(scraper) {
   await INLINE_CONTEXT_READY;
@@ -787,7 +818,71 @@ async function collectTmallListWithDetails(scraper) {
     if (DEBUG_TMALL_INLINE) {
       console.debug(`${LOG_PREFIX} 启动批量`, { total, normalizedLimit, cardCount: cards.length });
     }
-    const sessionItems = Array.from({ length: total }, (_, index) => parsedItems[index] || {});
+    const sessionItems = Array.from({ length: total }, (_, index) => {
+      const existing = parsedItems[index];
+      if (existing && existing.source_url) {
+        return existing;
+      }
+
+      const card = cards[index];
+      if (!card) {
+        return existing || {};
+      }
+
+      const anchor =
+        card.querySelector('a[href*="tmall.com/item.htm"], a[href*="detail.tmall.com"], a[href*="item.htm"]') ||
+        card.closest('a[href*="tmall.com/item.htm"], a[href*="detail.tmall.com"], a[href*="item.htm"]');
+      const rawHref = anchor?.getAttribute('href') || anchor?.href || null;
+      const itemId =
+        extractQueryParam(rawHref, 'id') ||
+        anchor?.getAttribute('data-itemid') ||
+        anchor?.dataset?.itemid ||
+        extractNumericId(rawHref);
+      const fallbackUrl = itemId
+        ? `https://detail.tmall.com/item.htm?id=${String(itemId).trim()}`
+        : absoluteUrl(rawHref);
+
+      const imageEl =
+        card.querySelector('img[data-src]') ||
+        card.querySelector('img[data-lazy-load]') ||
+        card.querySelector('img[data-original]') ||
+        card.querySelector('img[src]');
+      const rawImage =
+        imageEl?.getAttribute('data-src') ||
+        imageEl?.getAttribute('data-lazy-load') ||
+        imageEl?.getAttribute('data-original') ||
+        imageEl?.getAttribute('src');
+
+      const title =
+        getTextContent('.productTitle, .product-title, .title', card) ||
+        getTextContent('[class*="title--"]', card) ||
+        getTextContent('[class*="title"]', card) ||
+        anchor?.getAttribute('title') ||
+        anchor?.textContent?.trim() ||
+        '';
+
+      const priceText =
+        getTextContent(
+          '.productPrice, .product-price, .c-price, .s-price, [class*="price--"], [class*="text-price"], [class*="price"]',
+          card
+        ) || getTextContent('[class*="price"]', card);
+
+      const fallbackItem = createListItem({
+        title,
+        url: fallbackUrl,
+        image: normalizeImageUrl(rawImage, 'TMALL'),
+        priceText,
+        currencyFallback: 'CNY'
+      });
+
+      if (fallbackItem) {
+        return fallbackItem;
+      }
+      if (fallbackUrl) {
+        return { source_url: fallbackUrl };
+      }
+      return existing || {};
+    });
 
     const startResp = await sendRuntimeMessage('collector/inlineStart', {
       total,
@@ -804,6 +899,7 @@ async function collectTmallListWithDetails(scraper) {
     INLINE.activeIndex = -1;
     INLINE.requesting = false;
     STATE.isCollecting = true;
+    persistInlineResultsToStorage(INLINE.sessionId, []);
     await storeInlineContext(INLINE.sessionId, -1);
     await inlineRequestNext();
   } catch (error) {
@@ -1112,6 +1208,7 @@ async function inlineAbort() {
       console.warn(LOG_PREFIX, '清理批量会话失败', error);
     }
   }
+  const inlineResultsKey = sessionId ? getInlineResultsStorageKey(sessionId) : null;
   INLINE.sessionId = null;
   INLINE.activeIndex = -1;
   INLINE.requesting = false;
@@ -1120,6 +1217,9 @@ async function inlineAbort() {
   STATE.inlineResults = [];
   await new Promise((resolve) => {
     const keys = ['inlineSessionId', 'inlineActiveIndex', 'inlineTotal', LIST_STATE_STORAGE_KEY];
+    if (inlineResultsKey) {
+      keys.push(inlineResultsKey);
+    }
     chrome.storage.local.remove(keys, () => {
       cleanupStoredListState(() => {
         STATE.awaitingListResume = false;
@@ -1304,6 +1404,8 @@ function handleInlineItemResult(payload) {
     });
   }
   
+  STATE.inlineResults = Array.isArray(STATE.inlineResults) ? STATE.inlineResults : [];
+  
   INLINE.activeIndex = -1;
   storeInlineContext(INLINE.sessionId, -1, INLINE.total);
 
@@ -1313,6 +1415,7 @@ function handleInlineItemResult(payload) {
       total: INLINE.total,
       detail: payload.detail
     });
+    persistInlineResultsToStorage(INLINE.sessionId, STATE.inlineResults);
     console.log(
       `${LOG_PREFIX} 批量采集成功 [${payload.index + 1}/${INLINE.total}]`,
       payload.detail
@@ -1325,9 +1428,18 @@ function handleInlineItemResult(payload) {
       payload.failure
     );
   }
-
   if (payload.done) {
-    finalizeInlineSession(payload.summary || null);
+    if (STATE.pageType === 'list') {
+      finalizeInlineSession(payload.summary || null);
+    } else {
+      if (DEBUG_TMALL_INLINE) {
+        console.debug(`${LOG_PREFIX} 详情页收到最终结果,等待返回列表再收尾`, {
+          pageType: STATE.pageType
+        });
+      }
+      // 等待 resumeTmallInlineAutomation 在列表页完成收尾
+      STATE.awaitingListResume = true;
+    }
     return;
   }
   
@@ -1376,6 +1488,12 @@ async function resumeTmallInlineAutomation() {
   INLINE.total = summary.total || INLINE.total;
   INLINE.activeIndex = summary.currentIndex ?? INLINE.activeIndex;
   await storeInlineContext(INLINE.sessionId, INLINE.activeIndex, INLINE.total);
+  if (INLINE.sessionId) {
+    const storedInlineResults = await loadInlineResultsFromStorage(INLINE.sessionId);
+    if (storedInlineResults.length) {
+      STATE.inlineResults = storedInlineResults;
+    }
+  }
 
   if (STATE.site?.id !== 'TMALL') {
     return;
@@ -1580,6 +1698,13 @@ async function waitForTmallDetailReady(timeout = 5000) {
 // ...existing code...
 async function finalizeInlineSession(summary) {
   STATE.awaitingListResume = false;
+  const sessionId = INLINE.sessionId;
+  if (sessionId && STATE.inlineResults.length === 0) {
+    const storedInlineResults = await loadInlineResultsFromStorage(sessionId);
+    if (storedInlineResults.length) {
+      STATE.inlineResults = storedInlineResults;
+    }
+  }
   
   // 确保获取到最终的摘要信息
   const finalSummary = summary || (await inlineGetSummary()) || {};
@@ -1606,6 +1731,7 @@ async function finalizeInlineSession(summary) {
     detail
   }));
 
+  console.log(finalResults);
   const successCount = finalResults.length;
   const total = finalSummary.total || successCount + failures.length;
 
