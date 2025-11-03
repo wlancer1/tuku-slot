@@ -5,6 +5,7 @@ const loginPathInput = document.getElementById('loginPathInput');
 const verifyPathInput = document.getElementById('verifyPathInput');
 const createTaskPathInput = document.getElementById('createTaskPathInput');
 const recentTasksPathInput = document.getElementById('recentTasksPathInput');
+const collectLimitInput = document.getElementById('collectLimitInput');
 const debugModeInput = document.getElementById('debugModeInput');
 const statusEl = document.getElementById('status');
 
@@ -15,6 +16,7 @@ const DEFAULT_CONFIG = {
   verifyPath: '/auth/verify',
   createTaskPath: '/collector/tasks',
   recentTasksPath: '/collector/tasks?mine=1&limit=5',
+  collectLimit: 0,
   debug: false
 };
 
@@ -34,6 +36,7 @@ function init() {
     verifyPathInput.value = config.verifyPath;
     createTaskPathInput.value = config.createTaskPath;
     recentTasksPathInput.value = config.recentTasksPath;
+    collectLimitInput.value = config.collectLimit || 0;
     debugModeInput.checked = Boolean(config.debug);
   });
 }
@@ -58,6 +61,9 @@ form.addEventListener('submit', (event) => {
     return;
   }
 
+  const collectLimitRaw = collectLimitInput.value.trim();
+  const collectLimit = collectLimitRaw === '' ? 0 : Math.max(0, Math.floor(Number(collectLimitRaw)));
+
   const configToSave = {
     apiBaseUrl: trimTrailingSlash(apiBaseUrl),
     loginPagePath: normalizeLoginPagePath(loginPagePathInput.value, DEFAULT_CONFIG.loginPagePath),
@@ -65,6 +71,7 @@ form.addEventListener('submit', (event) => {
     verifyPath: normalizePath(verifyPathInput.value, DEFAULT_CONFIG.verifyPath),
     createTaskPath: normalizePath(createTaskPathInput.value, DEFAULT_CONFIG.createTaskPath),
     recentTasksPath: normalizePath(recentTasksPathInput.value, DEFAULT_CONFIG.recentTasksPath),
+    collectLimit,
     debug: debugModeInput.checked
   };
 

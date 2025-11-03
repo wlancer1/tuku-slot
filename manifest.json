@@ -64,6 +64,7 @@
         "https://www.temu.com/*"
       ],
       "js": [
+        "collector-utils.js",
         "contentScript.js"
       ],
       "run_at": "document_idle"

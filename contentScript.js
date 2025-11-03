@@ -13,6 +13,7 @@ const DEFAULT_CONFIG = {
   verifyPath: '/auth/verify',
   createTaskPath: '/collector/tasks',
   recentTasksPath: '/collector/tasks?mine=1&limit=5',
+  collectLimit: 0,
   debug: false
 };
 
@@ -50,6 +51,40 @@ const STATE = {
   awaitingListResume: false,
   inlineResults: []
 };
+
+const {
+  waitForBody,
+  clamp,
+  sendRuntimeMessage,
+  storageGet,
+  storageSet,
+  ensureArray,
+  absoluteUrl,
+  parsePrice,
+  detectCurrency,
+  collectImageSources,
+  collectVideoSources,
+  dedupe,
+  extractQueryParam,
+  getTextContent,
+  extractKeyValuePairs,
+  normalizeImageUrl,
+  pickFields,
+  readJsonLdProduct,
+  gatherWindowState,
+  findProductCandidate,
+  extractNumericId,
+  parseSellerInfoFromJsonLd,
+  createListItem,
+  uniqueByUrl,
+  copyToClipboard,
+  safeUrl,
+  trimTrailingSlash
+} = window.COLLECTOR_UTILS || {};
+
+if (!window.COLLECTOR_UTILS) {
+  console.error(`${LOG_PREFIX} 工具模块未加载，功能可能无法正常工作。`);
+}
 
 const WINDOW_STATE_KEYS = [
   '__NUXT__',
@@ -346,6 +381,7 @@ async function loadBackendConfig() {
       ...DEFAULT_CONFIG,
       ...stored
     };
+    STATE.config.collectLimit = Number(STATE.config.collectLimit) || 0;
     STATE.loginUrl = resolveLoginPageUrl(STATE.config);
     STATE.loginOrigin = determineLoginOrigin(STATE.loginUrl, STATE.config.apiBaseUrl);
   } catch (error) {
@@ -744,8 +780,13 @@ async function collectTmallListWithDetails(scraper) {
     STATE.inlineResults = [];
     const parsed = (await scraper()) || {};
     const parsedItems = Array.isArray(parsed.items) ? parsed.items.filter(Boolean) : [];
-    const total = cards.length;
+    const configuredLimitRaw = Number(STATE.config?.collectLimit);
+    const normalizedLimit = Number.isFinite(configuredLimitRaw) ? Math.max(0, Math.floor(configuredLimitRaw)) : 0;
+    const total = normalizedLimit > 0 ? Math.min(cards.length, normalizedLimit) : cards.length;
     await waitForTmallCard(total);
+    if (DEBUG_TMALL_INLINE) {
+      console.debug(`${LOG_PREFIX} 启动批量`, { total, normalizedLimit, cardCount: cards.length });
+    }
     const sessionItems = Array.from({ length: total }, (_, index) => parsedItems[index] || {});
 
     const startResp = await sendRuntimeMessage('collector/inlineStart', {
@@ -1536,69 +1577,77 @@ async function waitForTmallDetailReady(timeout = 5000) {
   }
 }
 
+// ...existing code...
 async function finalizeInlineSession(summary) {
   STATE.awaitingListResume = false;
+  
+  // 确保获取到最终的摘要信息
   const finalSummary = summary || (await inlineGetSummary()) || {};
-  await inlineAbort();
-
-  const successes = Array.isArray(finalSummary.results) ? finalSummary.results : [];
-  const failures = Array.isArray(finalSummary.failures) ? finalSummary.failures : [];
-  const total = finalSummary.total || successes.length + failures.length;
-  if (!STATE.inlineResults.length && successes.length) {
-    STATE.inlineResults = successes.map((detail, idx) => ({
-      index: detail.index ?? idx,
-      total,
-      detail
-    }));
+  
+  if (DEBUG_TMALL_INLINE) {
+    console.debug(`${LOG_PREFIX} finalizeInlineSession`, {
+      hasSummary: !!summary,
+      finalSummary,
+      cachedResultsCount: STATE.inlineResults.length
+    });
   }
 
-  const message = `批量采集完成，成功 ${successes.length}/${total} 个。`;
-  setButtonState(successes.length ? 'success' : 'error');
+  // 清理会话状态
+  await inlineAbort();
+
+  // 从摘要中提取成功和失败的列表
+  const successesFromSummary = Array.isArray(finalSummary.results) ? finalSummary.results : [];
+  const failures = Array.isArray(finalSummary.failures) ? finalSummary.failures : [];
+  
+  // 优先使用 content script 中缓存的结果
+  const finalResults = STATE.inlineResults.length > 0 ? STATE.inlineResults : successesFromSummary.map((detail, idx) => ({
+    index: detail.index ?? idx,
+    total: finalSummary.total,
+    detail
+  }));
+
+  const successCount = finalResults.length;
+  const total = finalSummary.total || successCount + failures.length;
+
+  const message = `批量采集完成，成功 ${successCount}/${total} 个。`;
+  setButtonState(successCount > 0 ? 'success' : 'error');
   if (STATE.button) {
     STATE.button.title = message;
   }
   showToast(
     failures.length ? `${message} 失败 ${failures.length} 个，请查看控制台。` : message,
-    successes.length ? 'success' : 'error'
+    successCount > 0 ? 'success' : 'error'
   );
 
-  if (STATE.inlineResults.length) {
-    console.group(`${LOG_PREFIX} 批量采集明细`);
+  // 关键修复: 统一打印最终结果
+  if (finalResults.length > 0) {
+    console.group(`${LOG_PREFIX} 批量采集明细 (共 ${finalResults.length} 条)`);
     try {
       console.table(
-        STATE.inlineResults.map((entry) => ({
-          index: (entry.index ?? 0) + 1,
-          total: entry.total,
-          title: entry.detail?.title || '',
-          itemId: entry.detail?.itemId || entry.detail?.item_id || '',
-          price: entry.detail?.price || null,
-          url: entry.detail?.source_url || ''
+        finalResults.map((entry) => ({
+          '序号': (entry.index ?? 0) + 1,
+          '标题': entry.detail?.title || '',
+          '商品ID': entry.detail?.itemId || entry.detail?.item_id || '',
+          '价格': entry.detail?.price || null,
+          '链接': entry.detail?.source_url || ''
         }))
       );
     } catch (error) {
-      console.log(STATE.inlineResults);
+      // 如果 console.table 失败,回退到普通打印
+      console.log(finalResults);
     }
-    console.log(`${LOG_PREFIX} 批量采集明细原始数据`, STATE.inlineResults.map((entry) => entry.detail));
+    console.log(`${LOG_PREFIX} 批量采集明细原始数据:`, finalResults.map((entry) => entry.detail));
     console.groupEnd();
   }
 
-  if (successes.length) {
-    console.group(`${LOG_PREFIX} 批量采集结果`);
-    try {
-      console.table(successes);
-    } catch (error) {
-      console.log(successes);
-    }
-    if (failures.length) {
-      console.warn(`${LOG_PREFIX} 采集失败条目`, failures);
-    }
-    console.groupEnd();
-  } else if (failures.length) {
-    console.warn(`${LOG_PREFIX} 批量采集未成功`, { failures });
+  if (failures.length > 0) {
+    console.warn(`${LOG_PREFIX} 采集失败条目:`, failures);
   }
 
+  // 清空缓存
   STATE.inlineResults = [];
 
+  // 4秒后重置按钮状态
   setTimeout(() => {
     if (!STATE.button) {
       return;
@@ -1611,6 +1660,7 @@ async function finalizeInlineSession(summary) {
         : '登录后即可采集当前页面';
   }, 4000);
 }
+
 
 
 
@@ -1669,260 +1719,6 @@ function simulateCardClick(index) {
   }
   return true;
 }
-
-
-function assignIfPresent(target, key, value) {
-  if (value === undefined || value === null) {
-    return;
-  }
-  target[key] = value;
-}
-
-function sanitizeArray(value) {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const cleaned = value.map((item) => {
-    if (typeof item === 'string') {
-      return item.trim();
-    }
-    return item;
-  });
-  const filtered = cleaned.filter((item) => item !== undefined && item !== null && item !== '');
-  return filtered.length ? filtered : undefined;
-}
-
-
-function showToast(message, type = 'info') {
-  let toast = document.getElementById(TOAST_ID);
-  if (!toast) {
-    toast = document.createElement('div');
-    toast.id = TOAST_ID;
-    document.body.appendChild(toast);
-  }
-  toast.textContent = message;
-  toast.dataset.type = type;
-  toast.classList.add('visible');
-  if (STATE.toastTimer) {
-    clearTimeout(STATE.toastTimer);
-  }
-  STATE.toastTimer = setTimeout(() => {
-    toast.classList.remove('visible');
-  }, 3200);
-}
-
-function openLoginPopup(options = {}) {
-  const providedUrl = options.loginUrl;
-  const loginUrl = providedUrl || STATE.loginUrl || resolveLoginPageUrl(STATE.config);
-  if (!loginUrl) {
-    return { ok: false, error: '未配置登录地址，请联系管理员。' };
-  }
-  STATE.loginUrl = loginUrl;
-  STATE.loginOrigin = determineLoginOrigin(loginUrl, STATE.config?.apiBaseUrl);
-
-  if (STATE.loginPopup && !STATE.loginPopup.closed) {
-    STATE.loginPopup.focus();
-    return { ok: true, reopened: true };
-  }
-
-  const width = options.width || 520;
-  const height = options.height || 640;
-  const dualScreenLeft = window.screenLeft !== undefined ? window.screenLeft : window.screenX || 0;
-  const dualScreenTop = window.screenTop !== undefined ? window.screenTop : window.screenY || 0;
-  const left = dualScreenLeft + Math.max(0, (window.innerWidth - width) / 2);
-  const top = dualScreenTop + Math.max(0, (window.innerHeight - height) / 2);
-  const features = [
-    `width=${Math.round(width)}`,
-    `height=${Math.round(height)}`,
-    `top=${Math.max(0, Math.round(top))}`,
-    `left=${Math.max(0, Math.round(left))}`,
-    'resizable=yes',
-    'scrollbars=yes'
-  ].join(',');
-
-  const popup = window.open(loginUrl, 'CollectorLogin', features);
-  if (!popup) {
-    return { ok: false, error: '浏览器阻止了登录弹窗，请允许弹窗后重试。' };
-  }
-  STATE.loginPopup = popup;
-  const checker = setInterval(() => {
-    if (!STATE.loginPopup || STATE.loginPopup.closed) {
-      clearInterval(checker);
-      STATE.loginPopup = null;
-    }
-  }, 1000);
-  return { ok: true };
-}
-
-function handleLoginMessage(event) {
-  if (!event) {
-    return;
-  }
-  const expectedOrigin = STATE.loginOrigin;
-  if (!expectedOrigin) {
-    return;
-  }
-  if (event.origin !== expectedOrigin) {
-    return;
-  }
-  const data = event.data || {};
-  const token = data.token || data.accessToken;
-  if (!token) {
-    return;
-  }
-  if (STATE.loginPopup && event.source && event.source !== STATE.loginPopup) {
-    return;
-  }
-  const payload = {
-    token,
-    user: data.user || data.profile || null
-  };
-  sendRuntimeMessage('collector/saveToken', payload)
-    .then((response) => {
-      if (!response?.ok) {
-        throw new Error(response?.error || '保存登录状态失败');
-      }
-      showToast('登录成功，可以开始采集。', 'success');
-      refreshAuthState({ skipVerify: true });
-    })
-    .catch((error) => {
-      console.warn(LOG_PREFIX, '保存登录状态失败', error);
-      showToast(error?.message || '登录状态写入失败，请重试。', 'error');
-    });
-
-  if (STATE.loginPopup && !STATE.loginPopup.closed) {
-    STATE.loginPopup.close();
-  }
-  STATE.loginPopup = null;
-}
-
-function handleScrapeProductRequest(sendResponse) {
-  (async () => {
-    try {
-      if (!STATE.site) {
-        await refreshPageContext();
-      }
-      const scraper = getScraper();
-      if (!scraper) {
-        throw new Error('当前页面未适配采集规则。');
-      }
-      if (STATE.pageType !== 'product') {
-        throw new Error('当前页面不是商品详情页。');
-      }
-      const data = await scraper();
-      sendResponse({ ok: true, data });
-    } catch (error) {
-      sendResponse({ ok: false, error: error?.message || String(error) });
-    }
-  })();
-}
-
-function handleBulkCollectionStatus(status) {
-  if (!status || !STATE.button) {
-    return;
-  }
-  const total = typeof status.total === 'number' ? status.total : null;
-  if (status.state === 'started') {
-    setButtonState('submitting');
-    if (total) {
-      STATE.button.title = `正在批量采集 ${total} 个商品`;
-    } else {
-      STATE.button.title = '正在批量采集商品';
-    }
-    const message = total
-      ? `开始批量采集 ${total} 个商品，详情数据将输出到控制台。`
-      : '开始批量采集商品，详情数据将输出到控制台。';
-    showToast(message, 'info');
-    return;
-  }
-  if (status.state === 'finished') {
-    const successCount =
-      typeof status.success === 'number'
-        ? status.success
-        : total !== null
-        ? total
-        : 0;
-    const message =
-      total !== null
-        ? `批量采集完成，成功 ${successCount}/${total} 个。`
-        : '批量采集完成。';
-    const success = successCount > 0;
-    setButtonState(success ? 'success' : 'error');
-    STATE.button.title = message;
-    showToast(message, success ? 'success' : 'error');
-    setTimeout(() => {
-      if (!STATE.button) {
-        return;
-      }
-      const nextState = STATE.isAuthenticated ? 'ready' : 'login';
-      setButtonState(nextState);
-      STATE.button.title =
-        nextState === 'ready'
-          ? '点击采集当前页面'
-          : '登录后即可采集当前页面';
-    }, 4000);
-  }
-}
-
-function handleBulkItemResult(payload) {
-  if (!payload) {
-    return;
-  }
-  const index =
-    typeof payload.index === 'number' ? payload.index + 1 : payload.index;
-  const total = payload.total;
-  if (payload.detail) {
-    const detail = payload.detail;
-    const logData = {
-      index,
-      total,
-      url: payload.url || detail.source_url || location.href,
-      title: detail.title || '',
-      itemId: detail.itemId || detail.item_id || null,
-      price: detail.price || null,
-      currency: detail.currency || null,
-      images: detail.images || [],
-      detailImages: detail.detailImages || detail.detail_images || [],
-      source: detail.source_site || payload.site || STATE.site?.id || ''
-    };
-    console.log(
-      `${LOG_PREFIX} 批量采集成功 [${index || '?'} / ${total || '?'}]`,
-      logData
-    );
-  } else {
-    console.warn(
-      `${LOG_PREFIX} 批量采集失败 [${index || '?'} / ${total || '?'}]`,
-      {
-        url: payload.url,
-        error: payload.error || '未知错误'
-      }
-    );
-  }
-}
-
-;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 function injectStyles() {
   if (document.getElementById(STYLE_ID)) {
@@ -2123,358 +1919,6 @@ function handleUrlChange() {
   refreshPageContext();
 }
 
-async function waitForBody() {
-  if (document.body) {
-    return;
-  }
-  await new Promise((resolve) => {
-    const observer = new MutationObserver(() => {
-      if (document.body) {
-        observer.disconnect();
-        resolve();
-      }
-    });
-    observer.observe(document.documentElement, { childList: true });
-  });
-}
-
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
-}
-
-async function sendRuntimeMessage(type, payload, options = {}) {
-  const maxRetries =
-    typeof options.retries === 'number' && options.retries >= 0 ? Math.floor(options.retries) : 1;
-  const retryDelay =
-    typeof options.retryDelay === 'number' && options.retryDelay >= 0
-      ? options.retryDelay
-      : 120;
-  let attempt = 0;
-
-  while (true) {
-    try {
-      return await new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage({ type, payload }, (response) => {
-          const lastError = chrome.runtime.lastError;
-          if (lastError) {
-            reject(new Error(lastError.message));
-            return;
-          }
-          resolve(response);
-        });
-      });
-    } catch (error) {
-      const message = error?.message || '';
-      const retryable =
-        attempt < maxRetries &&
-        typeof message === 'string' &&
-        message.includes('The message port closed before a response was received');
-      if (!retryable) {
-        throw error;
-      }
-      attempt += 1;
-      await new Promise((resolve) => setTimeout(resolve, retryDelay));
-    }
-  }
-}
-
-function storageGet(area, keys) {
-  return new Promise((resolve, reject) => {
-    chrome.storage[area].get(keys, (items) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(items);
-    });
-  });
-}
-
-function storageSet(area, items) {
-  return new Promise((resolve, reject) => {
-    chrome.storage[area].set(items, () => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve();
-    });
-  });
-}
-
-function ensureArray(value) {
-  if (Array.isArray(value)) {
-    return value;
-  }
-  if (value === null || value === undefined) {
-    return [];
-  }
-  return [value];
-}
-
-function absoluteUrl(url) {
-  if (!url || typeof url !== 'string') {
-    return null;
-  }
-  if (url.startsWith('http://') || url.startsWith('https://')) {
-    return url;
-  }
-  if (url.startsWith('//')) {
-    return `${location.protocol}${url}`;
-  }
-  try {
-    return new URL(url, location.href).href;
-  } catch (error) {
-    return null;
-  }
-}
-
-function parsePrice(text) {
-  if (!text || typeof text !== 'string') {
-    return null;
-  }
-  const numeric = text.replace(/[^\d.,]/g, '').replace(/,/g, '');
-  if (!numeric) {
-    return null;
-  }
-  const value = parseFloat(numeric);
-  return Number.isFinite(value) ? value : null;
-}
-
-function detectCurrency(text, fallback) {
-  if (!text || typeof text !== 'string') {
-    return fallback || null;
-  }
-  if (/[¥￥]/.test(text)) {
-    return 'CNY';
-  }
-  if (/\$/.test(text)) {
-    return 'USD';
-  }
-  if (/NT\$/.test(text)) {
-    return 'TWD';
-  }
-  if (/HK\$/.test(text)) {
-    return 'HKD';
-  }
-  if (fallback) {
-    return fallback;
-  }
-  return null;
-}
-
-function collectImageSources(selector) {
-  return Array.from(document.querySelectorAll(selector))
-    .map((img) => img.getAttribute('data-src') || img.getAttribute('src') || img.getAttribute('data-original'))
-    .filter(Boolean);
-}
-
-function collectVideoSources(selector) {
-  return Array.from(document.querySelectorAll(selector))
-    .map((video) => video.getAttribute('src') || video.getAttribute('data-src'))
-    .filter(Boolean);
-}
-
-function dedupe(array) {
-  return Array.from(new Set(array.filter(Boolean)));
-}
-
-function extractQueryParam(url, key) {
-  try {
-    const parsed = new URL(url);
-    return parsed.searchParams.get(key);
-  } catch (error) {
-    return null;
-  }
-}
-
-function getTextContent(selector, root = document) {
-  const element = root.querySelector(selector);
-  if (!element) {
-    return '';
-  }
-  return element.textContent?.trim() || '';
-}
-
-function extractKeyValuePairs(elements) {
-  const result = {};
-  for (const element of elements) {
-    const text = element.textContent || '';
-    if (!text) {
-      continue;
-    }
-    const parts = text.split(/[:：]/);
-    if (parts.length >= 2) {
-      const key = parts[0].trim();
-      const value = parts.slice(1).join(':').trim();
-      if (key && value) {
-        result[key] = value;
-      }
-    }
-  }
-  return result;
-}
-
-function normalizeImageUrl(url, siteId) {
-  let normalized = absoluteUrl(url);
-  if (!normalized) {
-    return null;
-  }
-  if (siteId === 'TMALL' || siteId === 'TAOBAO') {
-    normalized = normalized.replace(/_(\d+x\d+q\d+|\d+x\d+|sum)\.(jpg|png|jpeg)$/i, '.$2');
-    normalized = normalized.replace(/\.jpg_!!.*$/i, '.jpg');
-  }
-  if (siteId === 'ALI1688') {
-    normalized = normalized.replace(/_(\d+x\d+|400x400)\.(jpg|png|jpeg)$/i, '.$2');
-  }
-  return normalized;
-}
-
-function pickFields(source, keys) {
-  const result = {};
-  if (!source || typeof source !== 'object') {
-    return result;
-  }
-  for (const key of keys) {
-    if (source[key] !== undefined) {
-      result[key] = source[key];
-    }
-  }
-  return result;
-}
-
-function readJsonLdProduct() {
-  const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-  for (const script of scripts) {
-    const text = script.textContent?.trim();
-    if (!text) {
-      continue;
-    }
-    try {
-      const parsed = JSON.parse(text);
-      const candidates = ensureArray(parsed);
-      for (const candidate of candidates) {
-        if (!candidate || typeof candidate !== 'object') {
-          continue;
-        }
-        const type = ensureArray(candidate['@type']).join(',').toLowerCase();
-        if (type.includes('product')) {
-          return candidate;
-        }
-      }
-    } catch (error) {
-      continue;
-    }
-  }
-  return null;
-}
-
-function gatherWindowState() {
-  const state = {};
-  for (const key of WINDOW_STATE_KEYS) {
-    const value = window[key];
-    if (value && typeof value === 'object') {
-      state[key] = value;
-    }
-  }
-  return state;
-}
-
-function findProductCandidate(root) {
-  const queue = [];
-  const visited = new Set();
-  if (root && typeof root === 'object') {
-    queue.push(root);
-  }
-  while (queue.length) {
-    const current = queue.shift();
-    if (!current || typeof current !== 'object') {
-      continue;
-    }
-    if (visited.has(current)) {
-      continue;
-    }
-    visited.add(current);
-    const keys = Object.keys(current);
-    const hasTitle = keys.some((key) => /title|name/i.test(key));
-    const hasImage = keys.some((key) => /image|img|pic/i.test(key));
-    const hasPrice = keys.some((key) => /price/i.test(key));
-    const looksLikeProduct =
-      (hasTitle && hasImage) ||
-      (hasTitle && hasPrice) ||
-      keys.some((key) => /goodsId|itemId|productId/i.test(key));
-    if (looksLikeProduct) {
-      return current;
-    }
-    for (const value of Object.values(current)) {
-      if (value && typeof value === 'object') {
-        queue.push(value);
-      }
-    }
-  }
-  return null;
-}
-
-function extractNumericId(...sources) {
-  for (const source of sources) {
-    if (!source) {
-      continue;
-    }
-    if (typeof source === 'number') {
-      return source.toString();
-    }
-    if (typeof source === 'string') {
-      const match = source.match(/([0-9]{6,})/);
-      if (match) {
-        return match[1];
-      }
-    }
-  }
-  return null;
-}
-
-function parseSellerInfoFromJsonLd(jsonLd) {
-  if (!jsonLd || typeof jsonLd !== 'object') {
-    return null;
-  }
-  const seller = jsonLd.seller || jsonLd.brand || null;
-  if (!seller) {
-    return null;
-  }
-  if (typeof seller === 'string') {
-    return { name: seller };
-  }
-  return pickFields(seller, ['name', 'url', 'telephone']);
-}
-
-function createListItem({ title, url, image, priceText, currencyFallback }) {
-  if (!url) {
-    return null;
-  }
-  return {
-    title: title || '',
-    source_url: url,
-    image: image || null,
-    price: parsePrice(priceText || ''),
-    currency: detectCurrency(priceText || '', currencyFallback || 'CNY')
-  };
-}
-
-function uniqueByUrl(items) {
-  const seen = new Set();
-  const result = [];
-  for (const item of items) {
-    if (!item || !item.source_url) {
-      continue;
-    }
-    if (seen.has(item.source_url)) {
-      continue;
-    }
-    seen.add(item.source_url);
-    result.push(item);
-  }
-  return result;
-}
 
 function scrapeTemuProduct() {
   const jsonLd = readJsonLdProduct();
@@ -3116,51 +2560,4 @@ function determineLoginOrigin(loginUrl, apiBaseUrl) {
   }
   const fallback = safeUrl(apiBaseUrl);
   return fallback ? fallback.origin : null;
-}
-
-function copyToClipboard(text) {
-  if (typeof text !== 'string') {
-    text = text === undefined || text === null ? '' : String(text);
-  }
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  return new Promise((resolve, reject) => {
-    try {
-      const textarea = document.createElement('textarea');
-      textarea.value = text;
-      textarea.setAttribute('readonly', '');
-      textarea.style.position = 'fixed';
-      textarea.style.opacity = '0';
-      document.body.appendChild(textarea);
-      textarea.select();
-      const succeeded = document.execCommand('copy');
-      document.body.removeChild(textarea);
-      if (!succeeded) {
-        reject(new Error('无法复制到剪贴板'));
-        return;
-      }
-      resolve();
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-function safeUrl(value) {
-  if (!value || typeof value !== 'string') {
-    return null;
-  }
-  try {
-    return new URL(value, location.href);
-  } catch (error) {
-    return null;
-  }
-}
-
-function trimTrailingSlash(text) {
-  if (!text) {
-    return '';
-  }
-  return text.replace(/\/+$/, '');
 }

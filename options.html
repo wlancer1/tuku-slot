@@ -36,6 +36,11 @@
           <span>最近任务查询路径</span>
           <input id="recentTasksPathInput" type="text" placeholder="/collector/tasks?mine=1&limit=5" />
         </label>
+        <label class="field">
+          <span>批量采集最大数量</span>
+          <input id="collectLimitInput" type="number" min="0" placeholder="0 表示不限制" />
+          <small class="hint">设置每次批量采集最多处理的商品数，0 表示不限数量</small>
+        </label>
         <div class="field checkbox-field">
           <label class="checkbox">
             <input id="debugModeInput" type="checkbox" />
