@@ -11,7 +11,9 @@ const DEFAULT_CONFIG = {
   loginPath: '/auth/login',
   verifyPath: '/auth/verify',
   createTaskPath: '/collector/tasks',
-  recentTasksPath: '/collector/tasks?mine=1&limit=5',
+  recentTasksPath: '/api/collector/items?sort=-collected_at,-id&limit=5',
+  collectorItemPath: '/api/collector/items',
+  bulkCollectItemsPath: '/api/collector/items:bulk-create',
   debug: false
 };
 
@@ -125,6 +127,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return handleAsync(sendResponse, () => abortInlineSession(payload || {}, sender));
     case 'collector/inlineGet':
       return handleAsync(sendResponse, () => getInlineSessionSummary(payload || {}, sender));
+    case 'collector/createCollectedItem':
+      return handleAsync(sendResponse, () => createCollectedItem(payload || {}));
+    case 'collector/bulkCreateCollectedItems':
+      return handleAsync(sendResponse, () => bulkCreateCollectedItems(payload || {}));
 
     default:
       return false;
@@ -195,6 +201,9 @@ async function getBackendConfig(options = {}) {
     verifyPath: stored.verifyPath || DEFAULT_CONFIG.verifyPath,
     createTaskPath: stored.createTaskPath || DEFAULT_CONFIG.createTaskPath,
     recentTasksPath: stored.recentTasksPath || DEFAULT_CONFIG.recentTasksPath,
+    collectorItemPath: stored.collectorItemPath || stored.createCollectorItemPath || DEFAULT_CONFIG.collectorItemPath,
+    bulkCollectItemsPath:
+      stored.bulkCollectItemsPath || stored.collectorBulkItemsPath || DEFAULT_CONFIG.bulkCollectItemsPath,
     debug: Boolean(stored.debug)
   };
 
@@ -290,6 +299,54 @@ async function createCollectorTask(payload) {
     method: 'POST',
     path: config.createTaskPath,
     body: payload
+  });
+  return result;
+}
+
+async function createCollectedItem(payload) {
+  const item = payload?.item || payload?.data || payload;
+  if (!item || typeof item !== 'object') {
+    throw new Error('采集数据无效。');
+  }
+  const config = await ensureConfigured();
+  const headers = { ...(payload?.headers || {}) };
+  const idempotencyKey = payload?.idempotencyKey;
+  if (idempotencyKey && !headers['Idempotency-Key']) {
+    headers['Idempotency-Key'] = idempotencyKey;
+  }
+  const path = payload?.path || config.collectorItemPath || config.createTaskPath;
+  const result = await sendAuthenticatedRequest({
+    method: 'POST',
+    path,
+    body: item,
+    headers
+  });
+  return result;
+}
+
+async function bulkCreateCollectedItems(payload) {
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  if (!items.length) {
+    throw new Error('缺少批量商品数据。');
+  }
+  const config = await ensureConfigured();
+  const headers = { ...(payload?.headers || {}) };
+  const idempotencyKey = payload?.idempotencyKey;
+  if (idempotencyKey && !headers['Idempotency-Key']) {
+    headers['Idempotency-Key'] = idempotencyKey;
+  }
+  const path =
+    payload?.path ||
+    config.bulkCollectItemsPath ||
+    (config.collectorItemPath ? `${config.collectorItemPath}:bulk-create` : null);
+  if (!path) {
+    throw new Error('未配置批量采集接口地址。');
+  }
+  const result = await sendAuthenticatedRequest({
+    method: 'POST',
+    path,
+    body: { items },
+    headers
   });
   return result;
 }

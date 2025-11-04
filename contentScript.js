@@ -11,7 +11,9 @@ const DEFAULT_CONFIG = {
   loginPath: '/auth/login',
   verifyPath: '/auth/verify',
   createTaskPath: '/collector/tasks',
-  recentTasksPath: '/collector/tasks?mine=1&limit=5',
+  recentTasksPath: '/api/collector/items?sort=-collected_at,-id&limit=5',
+  collectorItemPath: '/api/collector/items',
+  bulkCollectItemsPath: '/api/collector/items:bulk-create',
   collectLimit: 0,
   debug: false
 };
@@ -467,7 +469,7 @@ async function handleButtonClick() {
 
   STATE.isCollecting = true;
   setButtonState('loading');
-    STATE.button.title = '正在解析页面内容';
+  STATE.button.title = '正在解析页面内容';
 
   try {
     if (STATE.site.id === 'TMALL' && STATE.pageType === 'list') {
@@ -475,19 +477,25 @@ async function handleButtonClick() {
       return;
     }
     const parsed = await scraper();
-    const payload = buildTaskPayload(parsed);
-    if (!payload) {
-      throw new Error('未能解析出有效的页面内容。');
+    const itemPayload = buildCollectedItemPayload(parsed, {
+      siteId: STATE.site?.id,
+      url: location.href,
+      collectedAt: new Date().toISOString()
+    });
+    if (!itemPayload) {
+      throw new Error('未能生成采集商品数据，请检查页面内容。');
     }
     setButtonState('submitting');
-    STATE.button.title = '正在提交后台任务';
-    const response = await sendRuntimeMessage('collector/createTask', payload);
-    if (!response?.ok) {
-      throw new Error(response?.error || '采集任务提交失败，请稍后重试。');
-    }
+    STATE.button.title = '正在保存商品数据';
+    const idempotencyKey = generateIdempotencyKey('item');
+    const savedItem = await postCollectedItem(itemPayload, {
+      idempotencyKey,
+      path: STATE.config?.collectorItemPath
+    });
+    const savedProductId = savedItem?.product_id || itemPayload.product_id;
     setButtonState('success');
-    STATE.button.title = '采集任务已提交';
-    showToast('已提交后台，稍后可在采集列表查看任务进度。', 'success');
+    STATE.button.title = savedProductId ? `已保存商品 ${savedProductId}` : '商品已保存到后台';
+    showToast(savedProductId ? `已保存商品 ${savedProductId}` : '商品已保存到后台。', 'success');
     setTimeout(() => {
       setButtonState('ready');
       STATE.button.title = '点击采集当前页面';
@@ -523,6 +531,134 @@ function sanitizeArray(value) {
   });
   const filtered = cleaned.filter((item) => item !== undefined && item !== null && item !== '');
   return filtered.length ? filtered : undefined;
+}
+
+function mapSiteIdToSource(siteId) {
+  if (!siteId) {
+    return 'other';
+  }
+  const normalized = String(siteId).trim();
+  if (!normalized) {
+    return 'other';
+  }
+  switch (normalized.toUpperCase()) {
+    case 'TEMU':
+      return 'temu';
+    case 'TMALL':
+      return 'tmall';
+    case 'TAOBAO':
+      return 'taobao';
+    case 'ALI1688':
+    case '1688':
+      return '1688';
+    default:
+      return normalized.toLowerCase();
+  }
+}
+
+function generateIdempotencyKey(prefix = 'collector') {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function buildCollectedItemPayload(detail, options = {}) {
+  if (!detail || typeof detail !== 'object') {
+    return null;
+  }
+
+  const siteId = options.siteId || detail.source_site || detail.site || STATE.site?.id || null;
+  const source = mapSiteIdToSource(siteId);
+
+  const url =
+    options.url ||
+    detail.source_url ||
+    detail.url ||
+    detail.link ||
+    detail.productUrl ||
+    detail.pageUrl ||
+    location.href;
+
+  const productIdCandidates = [
+    options.productId,
+    detail.product_id,
+    detail.productId,
+    detail.itemId,
+    detail.item_id,
+    detail.goodsId,
+    detail.goods_id,
+    extractNumericId(url)
+  ];
+  const productId = productIdCandidates
+    .map((value) => (value === undefined || value === null ? null : String(value).trim()))
+    .find((value) => value);
+
+  if (!productId) {
+    return null;
+  }
+
+  const collectedAt = options.collectedAt || new Date().toISOString();
+  const title = (options.title || detail.title || '').trim() || '未命名商品';
+  const subtitle = (options.subtitle || detail.subtitle || detail.subTitle || '').trim();
+  const imageCandidates = [
+    ...(ensureArray(detail.images) || []),
+    ...(ensureArray(detail.detailImages) || []),
+    ...(ensureArray(detail.detail_images) || [])
+  ];
+  const normalizedImages = sanitizeArray(
+    imageCandidates
+      .map((img) => normalizeImageUrl(img, siteId))
+      .filter((img) => typeof img === 'string' && img.trim())
+  );
+  const formattedTags = sanitizeArray(options.tags || detail.tags) || [];
+
+  const payload = {
+    source,
+    status: options.status || 'success',
+    collected_at: collectedAt,
+    product_id: productId,
+    title,
+    url,
+    tags: formattedTags
+  };
+
+  assignIfPresent(payload, 'subtitle', subtitle);
+  if (normalizedImages && normalizedImages.length) {
+    payload.images = normalizedImages;
+  } else {
+    payload.images = [];
+  }
+
+  return payload;
+}
+
+async function postCollectedItem(itemPayload, { idempotencyKey, path } = {}) {
+  const response = await sendRuntimeMessage('collector/createCollectedItem', {
+    item: itemPayload,
+    idempotencyKey,
+    path
+  });
+  if (!response?.ok) {
+    throw new Error(response?.error || '采集商品接口调用失败。');
+  }
+  return response.result || response.item || response.data || null;
+}
+
+async function postBulkCollectedItems(itemsPayload, { idempotencyKey, path } = {}) {
+  if (!Array.isArray(itemsPayload) || !itemsPayload.length) {
+    throw new Error('没有可提交的商品数据。');
+  }
+  const response = await sendRuntimeMessage('collector/bulkCreateCollectedItems', {
+    items: itemsPayload,
+    idempotencyKey,
+    path
+  });
+   // 兼容新格式：code 201 表示成功
+  if (!(response && (response.ok === true || response.code === 201|| response.code === 200))) {
+    throw new Error(response?.error || '批量采集商品接口调用失败。');
+  }
+  return response.result || response.data || response;
 }
 
 

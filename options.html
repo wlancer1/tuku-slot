@@ -33,8 +33,16 @@
           <input id="createTaskPathInput" type="text" placeholder="/collector/tasks" />
         </label>
         <label class="field">
-          <span>最近任务查询路径</span>
-          <input id="recentTasksPathInput" type="text" placeholder="/collector/tasks?mine=1&limit=5" />
+          <span>最近采集查询路径</span>
+          <input id="recentTasksPathInput" type="text" placeholder="/api/collector/items?sort=-collected_at,-id&limit=5" />
+        </label>
+        <label class="field">
+          <span>商品采集接口路径</span>
+          <input id="collectorItemPathInput" type="text" placeholder="/api/collector/items" />
+        </label>
+        <label class="field">
+          <span>批量采集接口路径</span>
+          <input id="bulkCollectItemsPathInput" type="text" placeholder="/api/collector/items:bulk-create" />
         </label>
         <label class="field">
           <span>批量采集最大数量</span>

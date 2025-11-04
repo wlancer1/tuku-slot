@@ -994,18 +994,73 @@ async function finalizeInlineSession(summary) {
     detail
   }));
 
+  const collectedAt = new Date().toISOString();
+  const siteId = finalSummary.site || STATE.site?.id || 'TMALL';
+  const bulkItems = [];
+  const skippedItems = [];
+  for (const entry of finalResults) {
+    const detail = entry?.detail || {};
+    const itemPayload = buildCollectedItemPayload(detail, {
+      siteId,
+      url:
+        detail.source_url ||
+        detail.url ||
+        detail.link ||
+        finalSummary.listUrl ||
+        finalSummary.list_url ||
+        location.href,
+      collectedAt,
+      status: 'success'
+    });
+    if (itemPayload) {
+      bulkItems.push(itemPayload);
+    } else {
+      skippedItems.push(detail);
+    }
+  }
+
+  let bulkSaveResult = null;
+  let bulkSaveFailed = false;
+  if (bulkItems.length) {
+    try {
+      const idempotencyKey = generateIdempotencyKey('bulk');
+      bulkSaveResult = await postBulkCollectedItems(bulkItems, {
+        idempotencyKey,
+        path: STATE.config?.bulkCollectItemsPath
+      });
+      if (DEBUG_TMALL_INLINE) {
+        console.debug(`${LOG_PREFIX} 批量保存完成`, bulkSaveResult);
+      }
+    } catch (error) {
+      console.warn(LOG_PREFIX, '批量保存商品失败', error);
+      showToast('商品采集完成，但保存接口调用失败，请查看控制台。', 'error');
+      bulkSaveFailed = true;
+    }
+  }
+
+  if (skippedItems.length && DEBUG_TMALL_INLINE) {
+    console.warn(`${LOG_PREFIX} 跳过保存的商品`, skippedItems);
+  }
+
   const successCount = finalResults.length;
   const total = finalSummary.total || successCount + failures.length;
-
-  const message = `批量采集完成，成功 ${successCount}/${total} 个。`;
-  setButtonState(successCount > 0 ? 'success' : 'error');
+  const savedCount = bulkItems.length
+    ? bulkSaveResult?.created ?? (Array.isArray(bulkSaveResult?.items) ? bulkSaveResult.items.length : bulkItems.length)
+    : null;
+  let message = `批量采集完成，成功 ${successCount}/${total} 个。`;
+  if (savedCount !== null) {
+    message = `批量采集完成，成功 ${successCount}/${total} 个，已保存 ${savedCount} 条。`;
+  }
+  if (bulkSaveFailed) {
+    message = `批量采集完成，成功 ${successCount}/${total} 个，但保存接口调用失败。`;
+  }
+  const toastType = !bulkSaveFailed && successCount > 0 ? 'success' : 'error';
+  setButtonState(successCount > 0 && !bulkSaveFailed ? 'success' : 'error');
   if (STATE.button) {
     STATE.button.title = message;
   }
-  showToast(
-    failures.length ? `${message} 失败 ${failures.length} 个，请查看控制台。` : message,
-    successCount > 0 ? 'success' : 'error'
-  );
+  const toastMessage = failures.length ? `${message} 失败 ${failures.length} 个，请查看控制台。` : message;
+  showToast(toastMessage, toastType);
 
   // 关键修复: 统一打印最终结果
   if (finalResults.length > 0) {
@@ -1103,3 +1158,13 @@ function simulateCardClick(index) {
   }
   return true;
 }
+
+Object.assign(window, {
+  INLINE,
+  collectTmallListWithDetails,
+  resumeTmallInlineAutomation,
+  runTmallInlineDetailScrape,
+  finalizeInlineSession,
+  installListStateGuards,
+  removeListStateGuards
+});

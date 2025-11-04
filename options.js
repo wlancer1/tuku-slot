@@ -5,6 +5,8 @@ const loginPathInput = document.getElementById('loginPathInput');
 const verifyPathInput = document.getElementById('verifyPathInput');
 const createTaskPathInput = document.getElementById('createTaskPathInput');
 const recentTasksPathInput = document.getElementById('recentTasksPathInput');
+const collectorItemPathInput = document.getElementById('collectorItemPathInput');
+const bulkCollectItemsPathInput = document.getElementById('bulkCollectItemsPathInput');
 const collectLimitInput = document.getElementById('collectLimitInput');
 const debugModeInput = document.getElementById('debugModeInput');
 const statusEl = document.getElementById('status');
@@ -15,7 +17,9 @@ const DEFAULT_CONFIG = {
   loginPath: '/auth/login',
   verifyPath: '/auth/verify',
   createTaskPath: '/collector/tasks',
-  recentTasksPath: '/collector/tasks?mine=1&limit=5',
+  recentTasksPath: '/api/collector/items?sort=-collected_at,-id&limit=5',
+  collectorItemPath: '/api/collector/items',
+  bulkCollectItemsPath: '/api/collector/items:bulk-create',
   collectLimit: 0,
   debug: false
 };
@@ -36,6 +40,8 @@ function init() {
     verifyPathInput.value = config.verifyPath;
     createTaskPathInput.value = config.createTaskPath;
     recentTasksPathInput.value = config.recentTasksPath;
+    collectorItemPathInput.value = config.collectorItemPath || DEFAULT_CONFIG.collectorItemPath;
+    bulkCollectItemsPathInput.value = config.bulkCollectItemsPath || DEFAULT_CONFIG.bulkCollectItemsPath;
     collectLimitInput.value = config.collectLimit || 0;
     debugModeInput.checked = Boolean(config.debug);
   });
@@ -71,6 +77,8 @@ form.addEventListener('submit', (event) => {
     verifyPath: normalizePath(verifyPathInput.value, DEFAULT_CONFIG.verifyPath),
     createTaskPath: normalizePath(createTaskPathInput.value, DEFAULT_CONFIG.createTaskPath),
     recentTasksPath: normalizePath(recentTasksPathInput.value, DEFAULT_CONFIG.recentTasksPath),
+    collectorItemPath: normalizePath(collectorItemPathInput.value, DEFAULT_CONFIG.collectorItemPath),
+    bulkCollectItemsPath: normalizePath(bulkCollectItemsPathInput.value, DEFAULT_CONFIG.bulkCollectItemsPath),
     collectLimit,
     debug: debugModeInput.checked
   };

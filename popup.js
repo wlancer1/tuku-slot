@@ -3,7 +3,9 @@ const DEFAULT_CONFIG = {
   loginPath: '/auth/login',
   verifyPath: '/auth/verify',
   createTaskPath: '/collector/tasks',
-  recentTasksPath: '/collector/tasks?mine=1&limit=5',
+  recentTasksPath: '/api/collector/items?sort=-collected_at,-id&limit=5',
+  collectorItemPath: '/api/collector/items',
+  bulkCollectItemsPath: '/api/collector/items:bulk-create',
   debug: false
 };
 
@@ -12,6 +14,8 @@ const authMetaEl = document.getElementById('authMeta');
 const bannerEl = document.getElementById('globalStatus');
 const apiBaseDisplayEl = document.getElementById('apiBaseDisplay');
 const taskPathDisplayEl = document.getElementById('taskPathDisplay');
+const collectorItemPathDisplayEl = document.getElementById('collectorItemPathDisplay');
+const bulkCollectItemsPathDisplayEl = document.getElementById('bulkCollectItemsPathDisplay');
 const tasksListEl = document.getElementById('tasksList');
 const tasksEmptyEl = document.getElementById('tasksEmpty');
 
@@ -171,6 +175,10 @@ async function loadRecentTasks() {
 function renderConfig() {
   apiBaseDisplayEl.textContent = backendConfig.apiBaseUrl || '未配置';
   taskPathDisplayEl.textContent = backendConfig.createTaskPath || DEFAULT_CONFIG.createTaskPath;
+  collectorItemPathDisplayEl.textContent =
+    backendConfig.collectorItemPath || backendConfig.createTaskPath || DEFAULT_CONFIG.collectorItemPath;
+  bulkCollectItemsPathDisplayEl.textContent =
+    backendConfig.bulkCollectItemsPath || DEFAULT_CONFIG.bulkCollectItemsPath;
 }
 
 function renderAuthState() {
@@ -208,10 +216,10 @@ function renderTasks(tasks) {
   for (const task of tasks.slice(0, 6)) {
     const li = document.createElement('li');
     li.className = 'task-row';
-    const title = task.title || task.source_url || '未命名任务';
+    const title = task.title || task.product_id || task.source_url || '未命名商品';
     const statusText = formatStatus(task.status || task.state);
-    const siteText = formatSite(task.source_site || task.site || '');
-    const created = formatDateTime(task.created_at || task.createdAt || task.create_time);
+    const siteText = formatSite(task.source || task.source_site || task.site || '');
+    const created = formatDateTime(task.collected_at || task.created_at || task.createdAt || task.create_time);
     const imageCount = Array.isArray(task.images) ? task.images.length : task.image_count || task.assets_count;
     li.innerHTML = `
       <span class="task-title">${title}</span>
@@ -236,7 +244,9 @@ function formatStatus(status) {
     success: '成功',
     done: '成功',
     failed: '失败',
-    error: '失败'
+    error: '失败',
+    duplicate: '重复',
+    ignored: '已忽略'
   };
   const key = status.toString().toLowerCase();
   return map[key] || status;
