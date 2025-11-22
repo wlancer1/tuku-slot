@@ -1180,7 +1180,30 @@ function scrapeTemuList() {
   };
 }
 
-function scrapeTmallProduct() {
+const TMALL_MEDIA_SELECTORS = [
+  '#mainPicImageEl[src]',
+  '.mainPicWrap--Ns5WQiHr img[src]',
+  '#J_UlThumb img[src]',
+  '#J_TSaleProp li img[src]',
+  '[class^="valueItemImgWrap--"] img[src]',
+  '[class*="valueItemImgWrap"] img[src]'
+];
+
+async function waitForTmallProductAssets(timeout = 8000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const ready =
+      document.readyState === 'complete' ||
+      TMALL_MEDIA_SELECTORS.some((selector) => Boolean(document.querySelector(selector)));
+    if (ready) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+}
+
+async function scrapeTmallProduct() {
+  await waitForTmallProductAssets();
   const jsonLd = readJsonLdProduct();
   const title =
     jsonLd?.name ||
@@ -1206,8 +1229,10 @@ function scrapeTmallProduct() {
     credit: getTextContent('#J_ShopInfo .tb-shop-rank'),
     score: getTextContent('#shop-info .shopdsr-score')
   };
+  const pageUrl = window.location?.href || '';
 
   return {
+    source_url: pageUrl,
     itemId: extractQueryParam(location.href, 'id') || extractNumericId(location.href),
     title,
     subtitle: jsonLd?.description || getTextContent('.tb-detail-hd p'),
